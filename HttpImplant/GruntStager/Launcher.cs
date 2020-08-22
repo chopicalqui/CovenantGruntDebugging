@@ -64,6 +64,7 @@ namespace GruntStager
                 byte[] RSAPublicKeyBytes = Encoding.UTF8.GetBytes(rsa.ToXmlString(false));
                 byte[] EncryptedRSAPublicKey = SetupAESKey.CreateEncryptor().TransformFinalBlock(RSAPublicKeyBytes, 0, RSAPublicKeyBytes.Length);
                 byte[] hash = hmac.ComputeHash(EncryptedRSAPublicKey);
+                Console.WriteLine("Stage 0");
                 string Stage0Body = String.Format(MessageFormat, aGUID + GUID, "0", "", Convert.ToBase64String(SetupAESKey.IV), Convert.ToBase64String(EncryptedRSAPublicKey), Convert.ToBase64String(hash));
 
                 ServicePointManager.SecurityProtocol = SecurityProtocolType.Ssl3 | SecurityProtocolType.Tls;
@@ -147,6 +148,7 @@ namespace GruntStager
                 byte[] EncryptedChallenge1 = SessionKey.CreateEncryptor().TransformFinalBlock(challenge1, 0, challenge1.Length);
                 hash = hmac.ComputeHash(EncryptedChallenge1);
 
+                Console.WriteLine("Stage 1");
                 string Stage1Body = String.Format(MessageFormat, GUID, "1", "", Convert.ToBase64String(SessionKey.IV), Convert.ToBase64String(EncryptedChallenge1), Convert.ToBase64String(hash));
                 transformedResponse = MessageTransform.Transform(Encoding.UTF8.GetBytes(Stage1Body));
 
